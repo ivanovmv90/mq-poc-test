@@ -1,93 +1,67 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Threading;
+using AmazomMqPoc.Logic;
+using AmazomMqPoc.Logic.Entities;
 using Apache.NMS;
 using Apache.NMS.ActiveMQ;
 using Apache.NMS.Util;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace AmazonMqPoc
 {
     class Program
     {
-        protected static AutoResetEvent semaphore = new AutoResetEvent(false);
-        protected static ITextMessage message = null;
-        protected static TimeSpan receiveTimeout = TimeSpan.FromSeconds(10);
+        private static IServiceProvider _serviceProvider;
 
         public static void Main(string[] args)
         {
-            Uri connecturi = new Uri("stomp+ssl://b-c43876a9-12c0-4c75-8580-f836108b30dc-1.mq.us-east-2.amazonaws.com:61614");
-
-            // NOTE: ensure the nmsprovider-activemq.config file exists in the executable folder.
-            IConnectionFactory factory = new ConnectionFactory(connecturi);
-
-            using (IConnection connection = factory.CreateConnection("mq-test", "qwerty123456"))
-            using (ISession session = connection.CreateSession())
+            var services = new ServiceCollection();
+            services.AddServices();
+            _serviceProvider = services.BuildServiceProvider();
+            using(var scope = _serviceProvider.CreateScope())
             {
-                // Examples for getting a destination:
-                //
-                // Hard coded destinations:
-                //    IDestination destination = session.GetQueue("FOO.BAR");
-                //    Debug.Assert(destination is IQueue);
-                //    IDestination destination = session.GetTopic("FOO.BAR");
-                //    Debug.Assert(destination is ITopic);
-                //
-                // Embedded destination type in the name:
-                //    IDestination destination = SessionUtil.GetDestination(session, "queue://FOO.BAR");
-                //    Debug.Assert(destination is IQueue);
-                //    IDestination destination = SessionUtil.GetDestination(session, "topic://FOO.BAR");
-                //    Debug.Assert(destination is ITopic);
-                //
-                // Defaults to queue if type is not specified:
-                //    IDestination destination = SessionUtil.GetDestination(session, "FOO.BAR");
-                //    Debug.Assert(destination is IQueue);
-                //
-                // .NET 3.5 Supports Extension methods for a simplified syntax:
-                //    IDestination destination = session.GetDestination("queue://FOO.BAR");
-                //    Debug.Assert(destination is IQueue);
-                //    IDestination destination = session.GetDestination("topic://FOO.BAR");
-                //    Debug.Assert(destination is ITopic);
-                IDestination destination = SessionUtil.GetDestination(session, "queue://FOO.BAR");
+                var msgBroker = _serviceProvider.GetService<IMessageBroker>();
+                msgBroker.StartListeners(OnMsg1, OnMsg2);
 
-                Console.WriteLine("Using destination: " + destination);
-
-                // Create a consumer and producer
-                using (IMessageConsumer consumer = session.CreateConsumer(destination))
-                using (IMessageProducer producer = session.CreateProducer(destination))
+                var msgId1 = Guid.NewGuid().ToString().Replace("-", "");
+                var msgId2 = Guid.NewGuid().ToString().Replace("-", "");
+                var message1 = new Message 
+                { 
+                    Body = "Foo",
+                    CustomHeaders = new Dictionary<string, string> { ["FLAG"] = "1"},
+                    Id = msgId1,
+                    Schedule = new Schedule { ScheduleCronString = "42 * * * *", Status = ScheduleStatus.Active }
+                };
+                var message2 = new Message
                 {
-                    // Start the connection so that messages will be processed.
-                    connection.Start();
-                    producer.DeliveryMode = MsgDeliveryMode.Persistent;
-                    producer.RequestTimeout = receiveTimeout;
-
-                    consumer.Listener += new MessageListener(OnMessage);
-
-                    // Send a message
-                    ITextMessage request = session.CreateTextMessage("Hello World!");
-                    request.NMSCorrelationID = "abc";
-                    request.Properties["NMSXGroupID"] = "cheese";
-                    request.Properties["myHeader"] = "Cheddar";
-
-                    producer.Send(request);
-
-                    // Wait for the message
-                    semaphore.WaitOne((int)receiveTimeout.TotalMilliseconds, true);
-
-                    if (message == null)
-                    {
-                        Console.WriteLine("No message received!");
-                    }
-                    else
-                    {
-                        Console.WriteLine("Received message with ID:   " + message.NMSMessageId);
-                        Console.WriteLine("Received message with text: " + message.Text);
-                    }
-                }
+                    Body = "Bar",
+                    CustomHeaders = new Dictionary<string, string> { ["FLAG"] = "2" },
+                    Id = msgId2,
+                    Schedule = new Schedule { ScheduleCronString = "44 * * * *", Status = ScheduleStatus.Active }
+                };
+                msgBroker.CreateMessage(message1).Wait();
+                msgBroker.CreateMessage(message2).Wait();
+                msgBroker.TriggerMessage(msgId1).Wait();
+                msgBroker.TriggerMessage(msgId2).Wait();
+                msgBroker.DeleteMessage(msgId1).Wait();
+                msgBroker.DeleteMessage(msgId2).Wait();
+                Console.ReadKey();
             }
         }
-        
-        protected static void OnMessage(IMessage receivedMsg)
+
+        private static void OnMsg1(IMessage message)
         {
-            message = receivedMsg as ITextMessage;
-            semaphore.Set();
+            var msg = message as ITextMessage;
+            var flag = msg.Properties["FLAG"].ToString();
+            Console.WriteLine($"From simple consumer: {msg.Text}, flag = {flag}");
+        }
+
+        private static void OnMsg2(IMessage message)
+        {
+            var msg = message as ITextMessage;
+            var flag = msg.Properties["FLAG"].ToString();
+            Console.WriteLine($"From durable consumer: {msg.Text}, flag = {flag}");
         }
     }
 }
